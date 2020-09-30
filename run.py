@@ -53,6 +53,7 @@ class TweetWrap:
         return True
 
     def delete(self):
+        return  # TODO
         if self.kind == self.KIND.TWEET:
             self.api.destroy_status(self.id)
         elif self.kind == self.KIND.RETWEET:
@@ -61,11 +62,11 @@ class TweetWrap:
             self.api.destroy_favorite(self.id)
 
 
-def main(*, config_file, archive_file):
+def main(*, config_file, archive_dir):
     with open(config_file, 'r') as fh:
         cfg = yaml.safe_load(fh)
 
-    if archive_file is not None:
+    if archive_dir is not None:
         pass  # TODO
 
     auth = tweepy.OAuthHandler(cfg['consumer_key'], cfg['consumer_secret'])
@@ -110,8 +111,8 @@ if __name__ == '__main__':
         '-c', '--config', metavar='FILE', required=True,
         help='read account configuration from FILE')
     parser.add_argument(
-        '-a', '--archive', metavar='FILE',
-        help='extract source tweets from Twitter archive FILE')
+        '-a', '--archive', metavar='DIR',
+        help='process Twitter archive data DIR')
     args = parser.parse_args()
 
-    main(config_file=args.config, archive_file=args.archive)
+    main(config_file=args.config, archive_dir=args.archive)
