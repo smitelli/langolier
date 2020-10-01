@@ -12,34 +12,28 @@ from datetime import datetime
 API limitation stuff. Per the docs at
 https://developer.twitter.com/en/docs/twitter-api/v1/tweets/timelines/api-reference/get-statuses-user_timeline
 the maximum number of tweets returned per page is 200, so we use that max in
-every request we can. Separately, the API imposes a *firm* limit of 3,200
-tweets total, regardless of any pagination trickery. The only way to find
+every request we can. Separately, the API imposes a *firm* return limit of
+3,200 tweets total, regardless of any pagination trickery. The only way to find
 tweets past this 3,200-tweet limit is to request an archive export. Therefore,
-we "squeeze" the limit down by 100 (chosen arbitrarily) so the account can
-never amass enough tweets to require another archive export in the future.
+we "squeeze" the limit down by 100 (chosen arbitrarily) so the account will
+(probably) never amass enough tweets to require another archive export.
 """
 PER_PAGE = 200
 HOLY_LIMIT = 3200
 HOLY_LIMIT_SQUEEZE = HOLY_LIMIT - 100
 
-STATUS_NOT_FOUND = 144
-PAGE_DOES_NOT_EXIST = 34
-
 
 class TweetBuilder:
-    def __init__(self, *, api, cfg):
+    def __init__(self, *, api, keep_days, keep_ids):
         self.api = api
-        self.keep_days = cfg['keep_days']
-        self.keep_ids = cfg['keep_ids']
+        self.keep_days = keep_days
+        self.keep_ids = keep_ids
 
     def from_api_favorite(self, status):
         return Tweet(
-            id_=status.id_str or str(status.id),
-            created_at=status.created_at,
-            kind=Tweet.KIND.FAVORITE,
-            keep_days=self.keep_days,
-            keep_ids=self.keep_ids,
-            api=self.api)
+            id_=status.id_str or str(status.id), created_at=status.created_at,
+            kind=Tweet.KIND.FAVORITE, keep_days=self.keep_days,
+            keep_ids=self.keep_ids, api=self.api)
 
     def from_api_status(self, status):
         if hasattr(status, 'retweeted_status'):
@@ -48,26 +42,20 @@ class TweetBuilder:
             kind = Tweet.KIND.TWEET
 
         return Tweet(
-            id_=status.id_str or str(status.id),
-            created_at=status.created_at,
-            kind=kind,
-            keep_days=self.keep_days,
-            keep_ids=self.keep_ids,
+            id_=status.id_str or str(status.id), created_at=status.created_at,
+            kind=kind, keep_days=self.keep_days, keep_ids=self.keep_ids,
             api=self.api)
 
     def from_archive_status(self, status):
-        if status['full_text'].startswith('RT @'):
+        if status['tweet']['full_text'].startswith('RT @'):  # ugh...
             kind = Tweet.KIND.RETWEET
         else:
             kind = Tweet.KIND.TWEET
 
         return Tweet(
-            id_=status['id_str'] or str(status['id']),
-            created_at=status['created_at'],
-            kind=kind,
-            keep_days=self.keep_days,
-            keep_ids=self.keep_ids,
-            api=self.api)
+            id_=status['tweet']['id_str'] or str(status['tweet']['id']),
+            created_at=status['tweet']['created_at'], kind=kind,
+            keep_days=self.keep_days, keep_ids=self.keep_ids, api=self.api)
 
 
 class Tweet:
@@ -89,7 +77,7 @@ class Tweet:
 
     @property
     def should_delete(self):
-        if (datetime.now() - self.created_at).days < self.keep_days:
+        if (datetime.now() - self.created_at).days <= self.keep_days:
             return False
 
         if self.id in self.keep_ids:
@@ -97,29 +85,28 @@ class Tweet:
 
         return True
 
-    def delete(self, force=False):
+    def delete(self, *, force=False):
+        CODE_DOES_NOT_EXIST = 34
+        CODE_NOT_FOUND = 144
+
         if force:
-            for fn in (
-                    self.api.destroy_status,
-                    self.api.unretweet,
-                    self.api.destroy_favorite):
-                try:
-                    fn(self.id)
-                except Exception:
-                    pass
+            fn_sequence = (
+                self.api.destroy_status,
+                self.api.unretweet,
+                self.api.destroy_favorite)
+        elif self.kind == self.KIND.TWEET:
+            fn_sequence = (self.api.destroy_status, )
+        elif self.kind == self.KIND.RETWEET:
+            fn_sequence = (self.api.unretweet, )
+        elif self.kind == self.KIND.FAVORITE:
+            fn_sequence = (self.api.destroy_favorite, )
 
-            return
-
-        try:
-            if self.kind == self.KIND.TWEET:
-                self.api.destroy_status(self.id)
-            elif self.kind == self.KIND.RETWEET:
-                self.api.unretweet(self.id)
-            elif self.kind == self.KIND.FAVORITE:
-                self.api.destroy_favorite(self.id)
-        except tweepy.error.TweepError as exc:
-            if exc.api_code not in (STATUS_NOT_FOUND, PAGE_DOES_NOT_EXIST):
-                raise
+        for fn in fn_sequence:
+            try:
+                fn(self.id)
+            except tweepy.error.TweepError as exc:
+                if exc.api_code not in (CODE_DOES_NOT_EXIST, CODE_NOT_FOUND):
+                    raise
 
 
 def enrich_json(obj):
@@ -167,12 +154,12 @@ def load_archive_file(filename):
         return json.loads(payload, object_hook=enrich_json)
 
 
-def main(*, config_file, archive_dir=None, skip=None, force=False):
-    if skip is not None:
-        print(f'Skipping past ID {skip}.')
-
+def main(*, config_file, archive_dir=None, force=False, skip=None):
     if force:
         print('Using force.')
+
+    if skip is not None:
+        print(f'Skipping past ID {skip}.')
 
     with open(config_file, 'r') as fh:
         cfg = yaml.safe_load(fh)
@@ -181,7 +168,9 @@ def main(*, config_file, archive_dir=None, skip=None, force=False):
     auth.set_access_token(cfg['access_token'], cfg['access_token_secret'])
     api = tweepy.API(auth_handler=auth)
 
-    tb = TweetBuilder(api=api, cfg=cfg)
+    tb = TweetBuilder(
+        api=api, keep_days=cfg['keep_days'], keep_ids=cfg['keep_ids'])
+    kept = 0
 
     if archive_dir is not None:
         print(f'Using {archive_dir} for archive mode.')
@@ -194,9 +183,8 @@ def main(*, config_file, archive_dir=None, skip=None, force=False):
         """
         Clean up tweets and retweets referenced in the archive data.
         """
-        kept = 0
         for status in archive_data:
-            tweet = tb.from_archive_status(status['tweet'])
+            tweet = tb.from_archive_status(status)
 
             if skip is not None and int(tweet.id) >= skip:
                 continue
@@ -206,47 +194,41 @@ def main(*, config_file, archive_dir=None, skip=None, force=False):
                 tweet.delete(force=force)
             else:
                 kept += 1
+    else:
+        print('Using the API.')
 
-        print(f'{kept} tweets kept.')
+        """
+        Clean up favorites.
+        """
+        for status in tweepy.Cursor(
+            api.favorites, screen_name=cfg['screen_name'], count=PER_PAGE
+        ).items():
+            tweet = tb.from_api_favorite(status)
 
-        return
+            if skip is not None and int(tweet.id) >= skip:
+                continue
 
-    print('Using the API.')
+            if tweet.should_delete:
+                print(tweet)
+                tweet.delete(force=force)
 
-    """
-    Clean up favorites.
-    """
-    for status in tweepy.Cursor(
-            api.favorites, screen_name=cfg['screen_name'],
-            count=PER_PAGE).items():
-
-        tweet = tb.from_api_favorite(status)
-
-        if skip is not None and int(tweet.id) >= skip:
-            continue
-
-        if tweet.should_delete:
-            print(tweet)
-            tweet.delete(force=force)
-
-    """
-    Clean up tweets and retweets.
-    """
-    kept = 0
-    for status in tweepy.Cursor(
+        """
+        Clean up tweets and retweets.
+        """
+        for status in tweepy.Cursor(
             api.user_timeline, screen_name=cfg['screen_name'], count=PER_PAGE,
-            exclude_replies=False, include_rts=True).items():
+            exclude_replies=False, include_rts=True
+        ).items():
+            tweet = tb.from_api_status(status)
 
-        tweet = tb.from_api_status(status)
+            if skip is not None and int(tweet.id) >= skip:
+                continue
 
-        if skip is not None and int(tweet.id) >= skip:
-            continue
-
-        if tweet.should_delete or kept >= HOLY_LIMIT_SQUEEZE:
-            print(tweet)
-            tweet.delete(force=force)
-        else:
-            kept += 1
+            if tweet.should_delete or kept >= HOLY_LIMIT_SQUEEZE:
+                print(tweet)
+                tweet.delete(force=force)
+            else:
+                kept += 1
 
     print(f'{kept} tweets kept.')
 
@@ -261,13 +243,13 @@ if __name__ == '__main__':
         '-a', '--archive', metavar='DIR',
         help='process Twitter archive data DIR')
     parser.add_argument(
-        '-s', '--skip', metavar='ID', type=int,
-        help='skip processing up to ID (inclusive)')
-    parser.add_argument(
         '-f', '--force', action='store_true',
         help='whale on the API to delete unusually persistent items')
+    parser.add_argument(
+        '-s', '--skip', metavar='ID', type=int,
+        help='skip processing up to ID (inclusive)')
     args = parser.parse_args()
 
     main(
-        config_file=args.config, archive_dir=args.archive, skip=args.skip,
-        force=args.force)
+        config_file=args.config, archive_dir=args.archive, force=args.force,
+        skip=args.skip)
