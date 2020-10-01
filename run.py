@@ -1,5 +1,9 @@
 import argparse
 import enum
+import html
+import json
+import os
+import re
 import tweepy
 import yaml
 from datetime import datetime
@@ -19,25 +23,63 @@ HOLY_LIMIT = 3200
 HOLY_LIMIT_SQUEEZE = HOLY_LIMIT - 100
 
 
-class TweetWrap:
+class TweetBuilder:
+    def __init__(self, *, api, cfg):
+        self.api = api
+        self.keep_days = cfg['keep_days']
+        self.keep_ids = cfg['keep_ids']
+
+    def from_api_favorite(self, status):
+        return Tweet(
+            id_=status.id_str or str(status.id),
+            created_at=status.created_at,
+            kind=Tweet.KIND.FAVORITE,
+            keep_days=self.keep_days,
+            keep_ids=self.keep_ids,
+            api=self.api)
+
+    def from_api_status(self, status):
+        if hasattr(status, 'retweeted_status'):
+            kind = Tweet.KIND.RETWEET
+        else:
+            kind = Tweet.KIND.TWEET
+
+        return Tweet(
+            id_=status.id_str or str(status.id),
+            created_at=status.created_at,
+            kind=kind,
+            keep_days=self.keep_days,
+            keep_ids=self.keep_ids,
+            api=self.api)
+
+    def from_archive_status(self, status):
+        if status['full_text'].startswith('RT @'):
+            kind = Tweet.KIND.RETWEET
+        else:
+            kind = Tweet.KIND.TWEET
+
+        return Tweet(
+            id_=status['id_str'] or str(status['id']),
+            created_at=status['created_at'],
+            kind=kind,
+            keep_days=self.keep_days,
+            keep_ids=self.keep_ids,
+            api=self.api)
+
+
+class Tweet:
     class KIND(enum.Enum):
         TWEET = 'Tweet'
         RETWEET = 'Retweet'
         FAVORITE = 'Favorite'
 
-    def __init__(self, status, *, favorite=False):
-        self.api = status._api
-        self.id = status.id_str or str(status.id)
-        self.created_at = status.created_at
-        self.keep_days = 365
-        self.keep_ids = []
-
-        if favorite:
-            self.kind = self.KIND.FAVORITE
-        elif hasattr(status, 'retweeted_status'):
-            self.kind = self.KIND.RETWEET
-        else:
-            self.kind = self.KIND.TWEET
+    def __init__(self, *, id_, created_at, kind, keep_days, keep_ids, api):
+        self.id = id_
+        self.created_at = created_at
+        self.kind = kind
+        self.keep_days = keep_days
+        self.keep_ids = keep_ids
+        self.api = api
 
     def __str__(self):
         return f'<{self.kind.value} {self.id}>'
@@ -57,21 +99,88 @@ class TweetWrap:
         if self.kind == self.KIND.TWEET:
             self.api.destroy_status(self.id)
         elif self.kind == self.KIND.RETWEET:
-            self.api.unretweet(self.id)
+            try:
+                self.api.unretweet(self.id)
+            except Exception as exc:
+                print(exc)  # TODO
         elif self.kind == self.KIND.FAVORITE:
             self.api.destroy_favorite(self.id)
+
+
+def enrich_json(obj):
+    """
+    Turn JSON types into more useful object types when warranted.
+    """
+    if 'created_at' in obj:
+        obj['created_at'] = datetime.strptime(
+            obj['created_at'], '%a %b %d %H:%M:%S %z %Y').replace(tzinfo=None)
+
+    for key in ('full_text', 'name'):
+        if key in obj:
+            obj[key] = html.unescape(obj[key])
+
+    return obj
+
+
+def load_archive_file(filename):
+    """
+    Parse a Twitter archive file into an object (usually a list of dicts).
+
+    This is needed because the Twitter archive data files are actually
+    JavaScript, and not conformant JSON. As of September 2020, the format is:
+
+        window.YTD.tweet.part0 = [ {
+          ...
+        } ]
+
+    This function reads the provided filename, strips off the assignment, and
+    tries to strip any trailing code that may be present, returning an object.
+    """
+    with open(filename, 'r') as fh:
+        payload = fh.read()
+
+    payload = re.search(r'^(?:.+?)=(.+)$', payload, re.DOTALL).group(1)
+
+    try:
+        return json.loads(payload, object_hook=enrich_json)
+    except json.decoder.JSONDecodeError as exc:
+        # HACK: If the decode fails, make a blind assumption that the reason is
+        # due to a trailing semicolon or continuation of JS code in the file.
+        # Slice the string at the position of the decode error then retry.
+        payload = payload[:exc.pos]
+
+        return json.loads(payload, object_hook=enrich_json)
 
 
 def main(*, config_file, archive_dir):
     with open(config_file, 'r') as fh:
         cfg = yaml.safe_load(fh)
 
-    if archive_dir is not None:
-        pass  # TODO
-
     auth = tweepy.OAuthHandler(cfg['consumer_key'], cfg['consumer_secret'])
     auth.set_access_token(cfg['access_token'], cfg['access_token_secret'])
     api = tweepy.API(auth_handler=auth)
+
+    tb = TweetBuilder(api=api, cfg=cfg)
+
+    if archive_dir is not None:
+        archive_data = load_archive_file(os.path.join(archive_dir, 'tweet.js'))
+
+        archive_data = sorted(
+            archive_data, key=lambda s: int(s['tweet']['id_str']), reverse=True)
+
+        """
+        Clean up tweets and retweets referenced in the archive data.
+        """
+        kept = 0
+        for status in archive_data:
+            tweet = tb.from_archive_status(status['tweet'])
+            if tweet.should_delete or kept >= HOLY_LIMIT_SQUEEZE:
+                print(tweet)
+                tweet.delete()
+            else:
+                kept += 1
+
+        return
 
     """
     Clean up favorites.
@@ -80,10 +189,7 @@ def main(*, config_file, archive_dir):
             api.favorites, screen_name=cfg['screen_name'],
             count=PER_PAGE).items():
 
-        tweet = TweetWrap(status, favorite=True)
-        tweet.keep_days = cfg['keep_days']
-        tweet.keep_ids = cfg['keep_ids']
-
+        tweet = tb.from_api_favorite(status)
         if tweet.should_delete:
             print(tweet)
             tweet.delete()
@@ -95,10 +201,7 @@ def main(*, config_file, archive_dir):
             api.user_timeline, screen_name=cfg['screen_name'], count=PER_PAGE,
             exclude_replies=False, include_rts=True).items()):
 
-        tweet = TweetWrap(status)
-        tweet.keep_days = cfg['keep_days']
-        tweet.keep_ids = cfg['keep_ids']
-
+        tweet = tb.from_api_status(status)
         if tweet.should_delete or i >= HOLY_LIMIT_SQUEEZE:
             print(tweet)
             tweet.delete()
