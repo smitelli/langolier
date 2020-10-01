@@ -22,6 +22,9 @@ PER_PAGE = 200
 HOLY_LIMIT = 3200
 HOLY_LIMIT_SQUEEZE = HOLY_LIMIT - 100
 
+STATUS_NOT_FOUND = 144
+PAGE_DOES_NOT_EXIST = 34
+
 
 class TweetBuilder:
     def __init__(self, *, api, cfg):
@@ -94,17 +97,29 @@ class Tweet:
 
         return True
 
-    def delete(self):
-        return  # TODO
-        if self.kind == self.KIND.TWEET:
-            self.api.destroy_status(self.id)
-        elif self.kind == self.KIND.RETWEET:
-            try:
+    def delete(self, force=False):
+        if force:
+            for fn in (
+                    self.api.destroy_status,
+                    self.api.unretweet,
+                    self.api.destroy_favorite):
+                try:
+                    fn(self.id)
+                except Exception:
+                    pass
+
+            return
+
+        try:
+            if self.kind == self.KIND.TWEET:
+                self.api.destroy_status(self.id)
+            elif self.kind == self.KIND.RETWEET:
                 self.api.unretweet(self.id)
-            except Exception as exc:
-                print(exc)  # TODO
-        elif self.kind == self.KIND.FAVORITE:
-            self.api.destroy_favorite(self.id)
+            elif self.kind == self.KIND.FAVORITE:
+                self.api.destroy_favorite(self.id)
+        except tweepy.error.TweepError as exc:
+            if exc.api_code not in (STATUS_NOT_FOUND, PAGE_DOES_NOT_EXIST):
+                raise
 
 
 def enrich_json(obj):
@@ -152,7 +167,13 @@ def load_archive_file(filename):
         return json.loads(payload, object_hook=enrich_json)
 
 
-def main(*, config_file, archive_dir):
+def main(*, config_file, archive_dir=None, skip=None, force=False):
+    if skip is not None:
+        print(f'Skipping past ID {skip}.')
+
+    if force:
+        print('Using force.')
+
     with open(config_file, 'r') as fh:
         cfg = yaml.safe_load(fh)
 
@@ -163,6 +184,8 @@ def main(*, config_file, archive_dir):
     tb = TweetBuilder(api=api, cfg=cfg)
 
     if archive_dir is not None:
+        print(f'Using {archive_dir} for archive mode.')
+
         archive_data = load_archive_file(os.path.join(archive_dir, 'tweet.js'))
 
         archive_data = sorted(
@@ -174,13 +197,21 @@ def main(*, config_file, archive_dir):
         kept = 0
         for status in archive_data:
             tweet = tb.from_archive_status(status['tweet'])
+
+            if skip is not None and int(tweet.id) >= skip:
+                continue
+
             if tweet.should_delete or kept >= HOLY_LIMIT_SQUEEZE:
                 print(tweet)
-                tweet.delete()
+                tweet.delete(force=force)
             else:
                 kept += 1
 
+        print(f'{kept} tweets kept.')
+
         return
+
+    print('Using the API.')
 
     """
     Clean up favorites.
@@ -190,21 +221,34 @@ def main(*, config_file, archive_dir):
             count=PER_PAGE).items():
 
         tweet = tb.from_api_favorite(status)
+
+        if skip is not None and int(tweet.id) >= skip:
+            continue
+
         if tweet.should_delete:
             print(tweet)
-            tweet.delete()
+            tweet.delete(force=force)
 
     """
     Clean up tweets and retweets.
     """
-    for i, status in enumerate(tweepy.Cursor(
+    kept = 0
+    for status in tweepy.Cursor(
             api.user_timeline, screen_name=cfg['screen_name'], count=PER_PAGE,
-            exclude_replies=False, include_rts=True).items()):
+            exclude_replies=False, include_rts=True).items():
 
         tweet = tb.from_api_status(status)
-        if tweet.should_delete or i >= HOLY_LIMIT_SQUEEZE:
+
+        if skip is not None and int(tweet.id) >= skip:
+            continue
+
+        if tweet.should_delete or kept >= HOLY_LIMIT_SQUEEZE:
             print(tweet)
-            tweet.delete()
+            tweet.delete(force=force)
+        else:
+            kept += 1
+
+    print(f'{kept} tweets kept.')
 
 
 if __name__ == '__main__':
@@ -216,6 +260,14 @@ if __name__ == '__main__':
     parser.add_argument(
         '-a', '--archive', metavar='DIR',
         help='process Twitter archive data DIR')
+    parser.add_argument(
+        '-s', '--skip', metavar='ID', type=int,
+        help='skip processing up to ID (inclusive)')
+    parser.add_argument(
+        '-f', '--force', action='store_true',
+        help='whale on the API to delete unusually persistent items')
     args = parser.parse_args()
 
-    main(config_file=args.config, archive_dir=args.archive)
+    main(
+        config_file=args.config, archive_dir=args.archive, skip=args.skip,
+        force=args.force)
