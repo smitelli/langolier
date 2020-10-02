@@ -2,8 +2,10 @@ import argparse
 import enum
 import html
 import json
+import logging
 import os
 import re
+import sys
 import tweepy
 import yaml
 from datetime import datetime
@@ -21,6 +23,10 @@ we "squeeze" the limit down by 100 (chosen arbitrarily) so the account will
 PER_PAGE = 200
 HOLY_LIMIT = 3200
 HOLY_LIMIT_SQUEEZE = HOLY_LIMIT - 100
+
+logging.basicConfig(
+    format='%(asctime)s [%(levelname)s] %(message)s', level='INFO')
+logger = logging.getLogger(__name__)
 
 
 class TweetBuilder:
@@ -89,7 +95,10 @@ class Tweet:
         CODE_DOES_NOT_EXIST = 34
         CODE_NOT_FOUND = 144
 
+        verb = 'Deleting'
         if force:
+            verb = 'Forcefully deleting'
+
             fn_sequence = (
                 self.api.destroy_status,
                 self.api.unretweet,
@@ -100,6 +109,8 @@ class Tweet:
             fn_sequence = (self.api.unretweet, )
         elif self.kind == self.KIND.FAVORITE:
             fn_sequence = (self.api.destroy_favorite, )
+
+        logger.info('%s %s...', verb, self)
 
         for fn in fn_sequence:
             try:
@@ -155,11 +166,7 @@ def load_archive_file(filename):
 
 
 def main(*, config_file, archive_dir=None, force=False, skip=None):
-    if force:
-        print('Using force.')
-
-    if skip is not None:
-        print(f'Skipping past ID {skip}.')
+    logger.info('Langolier has been summoned.')
 
     with open(config_file, 'r') as fh:
         cfg = yaml.safe_load(fh)
@@ -172,30 +179,8 @@ def main(*, config_file, archive_dir=None, force=False, skip=None):
         api=api, keep_days=cfg['keep_days'], keep_ids=cfg['keep_ids'])
     kept = 0
 
-    if archive_dir is not None:
-        print(f'Using {archive_dir} for archive mode.')
-
-        archive_data = load_archive_file(os.path.join(archive_dir, 'tweet.js'))
-
-        archive_data = sorted(
-            archive_data, key=lambda s: int(s['tweet']['id_str']), reverse=True)
-
-        """
-        Clean up tweets and retweets referenced in the archive data.
-        """
-        for status in archive_data:
-            tweet = tb.from_archive_status(status)
-
-            if skip is not None and int(tweet.id) >= skip:
-                continue
-
-            if tweet.should_delete or kept >= HOLY_LIMIT_SQUEEZE:
-                print(tweet)
-                tweet.delete(force=force)
-            else:
-                kept += 1
-    else:
-        print('Using the API.')
+    if archive_dir is None:
+        logger.info('Using API mode.')
 
         """
         Clean up favorites.
@@ -206,10 +191,8 @@ def main(*, config_file, archive_dir=None, force=False, skip=None):
             tweet = tb.from_api_favorite(status)
 
             if skip is not None and int(tweet.id) >= skip:
-                continue
-
-            if tweet.should_delete:
-                print(tweet)
+                logger.info('Skipping over %s.', tweet)
+            elif tweet.should_delete:
                 tweet.delete(force=force)
 
         """
@@ -222,15 +205,32 @@ def main(*, config_file, archive_dir=None, force=False, skip=None):
             tweet = tb.from_api_status(status)
 
             if skip is not None and int(tweet.id) >= skip:
-                continue
+                logger.info('Skipping over %s.', tweet)
+            elif tweet.should_delete or kept >= HOLY_LIMIT_SQUEEZE:
+                tweet.delete(force=force)
+            else:
+                kept += 1
+    else:
+        logger.info('Using %s for archive mode.', archive_dir)
 
-            if tweet.should_delete or kept >= HOLY_LIMIT_SQUEEZE:
-                print(tweet)
+        archive_data = load_archive_file(os.path.join(archive_dir, 'tweet.js'))
+        archive_data = sorted(
+            archive_data, key=lambda s: int(s['tweet']['id_str']), reverse=True)
+
+        """
+        Clean up tweets and retweets referenced in the archive data.
+        """
+        for status in archive_data:
+            tweet = tb.from_archive_status(status)
+
+            if skip is not None and int(tweet.id) >= skip:
+                logger.info('Skipping over %s.', tweet)
+            elif tweet.should_delete or kept >= HOLY_LIMIT_SQUEEZE:
                 tweet.delete(force=force)
             else:
                 kept += 1
 
-    print(f'{kept} tweets kept.')
+    logger.info('Langolier is sated. %d tweet(s) kept.', kept)
 
 
 if __name__ == '__main__':
@@ -250,6 +250,6 @@ if __name__ == '__main__':
         help='skip processing up to ID (inclusive)')
     args = parser.parse_args()
 
-    main(
+    sys.exit(main(
         config_file=args.config, archive_dir=args.archive, force=args.force,
-        skip=args.skip)
+        skip=args.skip))
