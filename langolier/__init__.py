@@ -10,6 +10,8 @@ import tweepy
 import yaml
 from datetime import datetime
 
+__version__ = '0.0.1'
+
 """
 API limitation stuff. Per the docs at
 https://developer.twitter.com/en/docs/twitter-api/v1/tweets/timelines/api-reference/get-statuses-user_timeline
@@ -30,15 +32,19 @@ logger = logging.getLogger(__name__)
 
 
 class TweetBuilder:
+    """
+    Build Tweet objects out of either API responses or JSON archive objects.
+    """
+
     def __init__(self, *, api, keep_days, keep_ids):
         self.api = api
         self.keep_days = keep_days
         self.keep_ids = keep_ids
 
-    def from_api_favorite(self, status):
+    def from_api_like(self, status):
         return Tweet(
             id_=status.id_str or str(status.id), created_at=status.created_at,
-            kind=Tweet.KIND.FAVORITE, keep_days=self.keep_days,
+            kind=Tweet.KIND.LIKE, keep_days=self.keep_days,
             keep_ids=self.keep_ids, api=self.api)
 
     def from_api_status(self, status):
@@ -65,10 +71,17 @@ class TweetBuilder:
 
 
 class Tweet:
+    """
+    Representation of a live tweet on Twitter's site.
+
+    Holds only enough information to delete a tweet (or retweet/like) and
+    calculate its current age.
+    """
+
     class KIND(enum.Enum):
         TWEET = 'Tweet'
         RETWEET = 'Retweet'
-        FAVORITE = 'Favorite'
+        LIKE = 'Like'
 
     def __init__(self, *, id_, created_at, kind, keep_days, keep_ids, api):
         self.id = id_
@@ -83,6 +96,9 @@ class Tweet:
 
     @property
     def should_delete(self):
+        """
+        Is this tweet old, *and* is it not marked for preservation?
+        """
         if (datetime.now() - self.created_at).days <= self.keep_days:
             return False
 
@@ -92,13 +108,19 @@ class Tweet:
         return True
 
     def delete(self, *, force=False):
+        """
+        Delete this tweet.
+
+        "Force" mode tries all deletion methods, disregarding the appropriate
+        chose for the tweet. This is apparently necessary to delete retweets
+        from the mid-2010s.
+        """
         CODE_DOES_NOT_EXIST = 34
         CODE_NOT_FOUND = 144
 
         verb = 'Deleting'
         if force:
             verb = 'Forcefully deleting'
-
             fn_sequence = (
                 self.api.destroy_status,
                 self.api.unretweet,
@@ -107,7 +129,7 @@ class Tweet:
             fn_sequence = (self.api.destroy_status, )
         elif self.kind == self.KIND.RETWEET:
             fn_sequence = (self.api.unretweet, )
-        elif self.kind == self.KIND.FAVORITE:
+        elif self.kind == self.KIND.LIKE:
             fn_sequence = (self.api.destroy_favorite, )
 
         logger.info('%s %s...', verb, self)
@@ -165,7 +187,13 @@ def load_archive_file(filename):
         return json.loads(payload, object_hook=enrich_json)
 
 
-def main(*, config_file, archive_dir=None, force=False, skip=None):
+def langolier_run(*, config_file, archive_dir=None, force=False, skip=None):
+    """
+    Delete tweets, retweets, and likes.
+
+    These can either come from the live API (limited to 3,200 items) or from an
+    archive data directory (does not contain usable favorites).
+    """
     logger.info('Langolier has been summoned.')
 
     with open(config_file, 'r') as fh:
@@ -183,12 +211,12 @@ def main(*, config_file, archive_dir=None, force=False, skip=None):
         logger.info('Using API mode.')
 
         """
-        Clean up favorites.
+        Clean up likes.
         """
         for status in tweepy.Cursor(
             api.favorites, screen_name=cfg['screen_name'], count=PER_PAGE
         ).items():
-            tweet = tb.from_api_favorite(status)
+            tweet = tb.from_api_like(status)
 
             if skip is not None and int(tweet.id) >= skip:
                 logger.info('Skipping over %s.', tweet)
@@ -233,9 +261,11 @@ def main(*, config_file, archive_dir=None, force=False, skip=None):
     logger.info('Langolier is sated. %d tweet(s) kept.', kept)
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser(
         description='Delete old tweets, either by API iteration or archives')
+    parser.add_argument(
+        '-V', '--version', action='version', version=f'%(prog)s {__version__}')
     parser.add_argument(
         '-c', '--config', metavar='FILE', required=True,
         help='read account configuration from FILE')
@@ -250,6 +280,10 @@ if __name__ == '__main__':
         help='skip processing up to ID (inclusive)')
     args = parser.parse_args()
 
-    sys.exit(main(
+    sys.exit(langolier_run(
         config_file=args.config, archive_dir=args.archive, force=args.force,
         skip=args.skip))
+
+
+if __name__ == '__main__':
+    main()
