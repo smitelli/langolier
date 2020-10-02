@@ -10,7 +10,7 @@ Langolier eats old tweets from [Twitter](https://twitter.com/). It can operate i
 3,200 Tweets
 ------------
 
-Twitter's API is an odd duck. Once an item passes the 3,200-tweet boundary, there's no way to reach it through any available pagination method. Furthermore, once an item falls out of pagination, it never comes back into view. Even if everything posted above these items is removed, they don't slide back into the viewable range. This doesn't appear to be documented anywhere, but the behavior was observed emperically.
+Twitter's API is an odd duck. Once an item passes the 3,200-tweet boundary, there's no way to reach it through any available pagination method. Furthermore, once an item falls out of pagination, it never comes back into view. Even if everything posted above these items is removed, they don't slide back into the viewable range. This doesn't appear to be documented anywhere, but the behavior was observed empirically.
 
 To avoid having to request additional archive exports for high-volume accounts, Langolier will start deleting tweets starting at the 3,100-tweet mark _even if they are not old enough to expire naturally._ This is done solely to protect against tweets spilling over the 3,200 boundary and becoming inaccessible to subsequent runs. This means that Langolier will _either_ preserve `keep_days` days worth of tweets, or 3,100 tweets, _whichever is smaller._
 
@@ -37,8 +37,8 @@ Langolier requires a configuration file to perform any useful work. The format i
       - '23456'
       - '34567'
 
-* `consumer_key`, `consumer_secret`, `access_token`, and `access_token_secret`: These are OAuth keys for the Twitter API. You'll likely have to register a new app if you don't have consumer keys. Make sure the key you generate has both read and write access to your account.
-* `screen_name`: Should be set to your Twitter handle. I.E. if your profile is https://twitter.com/smitelli and people mention you as `@smitelli`, this should be set to `smitelli`.
+* `consumer_key`, `consumer_secret`, `access_token`, and `access_token_secret`: These are OAuth keys for the Twitter API. You'll likely have to register a new app if you don't have consumer keys already. Make sure the key you generate has both read and write access to your account.
+* `screen_name`: Should be set to your Twitter handle. I.E. if your profile is https://twitter.com/smitelli and people mention you as `@smitelli`, this should be set to `smitelli`. It goes without saying that this needs to match the API tokens, otherwise Langolier will read tweets from an account that it doesn't have the authority to delete from.
 * `keep_days`: The maximum number of days a tweet will be retained for. Once a tweet is older than this, it becomes eligible for automatic deletion. Tweets may be removed earlier than this if the account has more than 3,100 tweets at any given time.
 * `keep_ids`: A list of tweet IDs, **as strings and not numbers.** Each ID in this list will be spared from deletion. So, if you wanted to preserve the tweet seen at https://twitter.com/smitelli/status/335455012, the line should look like `- '335455012'`. To preserve no tweets, use the format `keep_ids: []`. Tweets in this list _may_ be deleted if the account currently has more than 3,100 tweets that have been posted since.
 
